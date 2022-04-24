@@ -1,0 +1,275 @@
+---
+title: "Priority order"
+output: html_notebook
+---
+Load libraries:
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(ChemmineR)
+library(fmcsR)
+library(rcdk)
+library(ggtree)
+library(ape)
+library(phytools)
+library(fpc)
+library(factoextra)
+library(NbClust)
+```
+
+Utility functions:
+```{r}
+pres_abs <- function(col, total) {
+  #INPUTS
+  #col: a column vector associated with one methyl ether
+  #total: the total number of files
+  #OUTPUTS
+  #the number of files w/ nonzero amts of ME divided by total num of files
+  rel_no <- sum(!is.na(col))
+  rel_no/total
+}
+
+calc_sums <- function(species_matrix, num_files) {
+  #INPUTS
+  #species_matrix: the matrix containing processed ME abundance data
+  #num_files: the total number of files
+  #OUTPUTS
+  #sums across each ME and divides by total number of files
+  sums <- apply(species_matrix[1:ncol(species_matrix)], 2, sum, na.rm = TRUE) #sum for each ME
+  sums <- sums/num_files
+  sums <- sort(sums[sums!=0], decreasing=TRUE)
+  sums
+}
+
+dist_maker <- function (name_list, pairwise_dist) {
+  #INPUTS
+  #name_list: vector containing the labels you will pass to pairwise_dist
+  #pairwise_dist: a function which takes in two labels and returns the pairwise distance between the two
+  #OUTPUTS
+  #a distance matrix
+  d <- sapply(name_list, 
+         function(name1) sapply(name_list, 
+                            function(name2) pairwise_dist(name1, name2)))
+  d <- as.dist(d)
+  return (d)
+}
+```
+
+## Computing priority order:
+Pre-processing spreadsheets:
+
+```{r}
+setwd("/Users/anjali/Desktop/updated_spider_code")
+me_matrix <- read_excel(path = "Methyl Ether Matrix.xlsx", sheet = "Methyl Ether Matrix (FINAL)")
+me_matrix <- as.data.frame(me_matrix)
+me_names <- me_matrix[1,] #get colnames
+me_matrix <-  me_matrix %>%
+              filter(!is.na(me_matrix[,1])) #remove unapproved files
+              
+me_matrix <- me_matrix[-1,] #remove extra row from the top
+row.names(me_matrix) <- me_matrix$...2 #assign row names to file names
+
+me_matrix <- select(me_matrix, !which(is.na(me_names))) #keep only named columns
+colnames(me_matrix) <- me_names[!is.na(me_names)] #assign column names to ME names
+me_matrix <- select(me_matrix, !"Unidentified Methyl Ethers?") #remove unidentified column
+
+me_matrix <- apply(me_matrix, c(1,2), as.numeric) #convert from character vectors to numeric vectors
+me_matrix <- as.data.frame(me_matrix) #convert back to data frame
+
+nrow(me_matrix) #should be 246
+#SHOULD I HAVE NORMALIZED?????
+```
+```{r}
+head(me_matrix)
+```
+Define which categories to calculate priority lists for:
+```{r}
+species_names_all <- c("Acuta", "Brevi", "EF", "Eury", "Fili", "Kama", "Pall", "Palu", "Quasi", "Rest", "Stella", "Tri", "Vers", "Waika")
+species_names_F <- c("Acuta_F", "Brevi_F", "EF_F", "Eury_F", "Fili_F", "Kama_F", "Pall_F", "Palu_F", "Quasi_F", "Rest_F", "Stella_F", "Tri_F", "Vers_F", "Waika_F")
+#species_names_J <- c("Acuta_J", "Brevi_J", "EF_J", "Eury_J", "Fili_J", "Kama_J", "Pall_J", "Palu_J", "Quasi_J", "Rest_J", "Stella_J", "Tri_J", "Vers_J", "Waika_J")
+species_names_M <- c("Acuta_M", "Brevi_M", "EF_M", "Eury_M", "Fili_M", "Kama_M", "Pall_M", "Palu_M", "Quasi_M", "Rest_M", "Stella_M", "Tri_M", "Vers_M", "Waika_M")
+
+species_names <- c(species_names_all, species_names_F, species_names_M )
+```
+Generate relative abundance and presence-absence lists
+```{r}
+me_list <- list()
+rel_list <- list()
+```
+
+```{r}
+for (species_name in species_names){
+  #selects only files of the species
+  species_matrix <- filter(me_matrix, grepl(species_name, rownames(me_matrix), fixed = TRUE))
+  num_files <- nrow(species_matrix)
+
+  if(num_files==0){next} #skip iteration if there are no files
+
+  #relative abundance
+  species_matrix_rel <- as.data.frame(species_matrix)
+  species_matrix_rel <- species_matrix_rel[2:ncol(species_matrix_rel)]
+  sums <- rowSums(species_matrix_rel, na.rm = TRUE)
+  for(row in 1:nrow(species_matrix_rel)){
+    species_matrix_rel[row,] <- species_matrix_rel[row,]/sums[row]
+  }
+  rel_sums <- calc_sums(species_matrix_rel, num_files)
+
+  #presence/absence
+  pres_sums <- apply(species_matrix[2:ncol(species_matrix)], 2, pres_abs, total = nrow(species_matrix))
+  pres_sums <- sort(pres_sums[pres_sums!=0], decreasing=TRUE)
+
+  df <- data.frame(names(rel_sums), rel_sums,
+                 names(pres_sums), pres_sums)
+  rownames(df) <- NULL
+
+  if (nrow(df) == 0) {next} #skip iteration if there are no identified MEs
+
+  me_list[[species_name]] <- sort(unique(names(c(pres_sums[pres_sums > 0.5], rel_sums[rel_sums > 0.5]))))
+  rel_list[[species_name]] <- rel_sums[order(names(rel_sums))] #alphabetical order
+}
+```
+Modify lists:
+```{r}
+species_names = c("Acuta", "Brevi", "EF", "Eury", "Fili",
+                  "Kama", "Pall", "Palu", "Quasi", "Rest",
+                  "Stella", "Tri", "Vers", "Waika")
+complete_me_list <- c()
+m_me_list <- c()
+f_me_list <- c()
+mf_me_list <- list()
+
+#MEs which are likely a mixture of two compounds
+double_compounds <- c("ME 23_A", "ME 33_C") 
+#species with significant difference between male and female pheromone distributions
+mf_species = c("Acuta", "Brevi", "Stella", "Tri", "Vers") 
+
+for (species in species_names){
+  #populate mf_me_list
+  mf_me_list[[species]] <- unique(c(me_list[[paste(species,"_M", sep = "")]], me_list[[paste(species,"_F", sep = "")]]))
+  
+  #replace mf species:
+  if (species %in% mf_species) {
+    me_list[[species]] <- mf_me_list[[species]]
+  }
+  
+  #replace double compounds
+  mes <- me_list[[species]]
+  for (me in double_compounds) {
+    if (me %in% mes) {
+      mes <- c(mes, paste(me,"1", sep = ""))
+      mes <- c(mes, paste(me,"2", sep = ""))
+      mes <- mes[mes!= me]
+    }
+  }
+  me_list[[species]] <- mes
+  
+  complete_me_list <- c(complete_me_list, me_list[[species]])
+  m_me_list <- c(m_me_list, me_list[[paste(species,"_M", sep = "")]])
+  f_me_list <- c(f_me_list, me_list[[paste(species,"_F", sep = "")]])
+}
+
+complete_me_list <- sort(unique(complete_me_list))
+f_me_list <- sort(unique(f_me_list))
+m_me_list <- sort(unique(m_me_list))
+
+complete_me_list
+```
+
+## Computing MCS tree:
+Reading SMILES keys and converting to SDF
+```{r}
+structure_table <- read_excel(path = "MS Library Info.xlsx", sheet = "Methyl Ethers", col_names = TRUE) 
+structure_table <- as.data.frame(structure_table)
+#need to have complete_me_list from Priority Order
+structure_table <- structure_table %>%
+  filter(structure_table$`Code Name` %in% complete_me_list) %>% #only MEs on priority list
+  filter(!is.na(`Smiles Key Format`))#only MEs with structures
+structure_table <- arrange(structure_table, structure_table$`Code Name`) #order MEs alphabetically
+
+labels <- structure_table$`Code Name`
+smiles <- structure_table$`Smiles Key Format`
+names(smiles) <- labels
+
+#remove OMe
+#smiles[29] <- substr(smiles[29], 0, nchar(smiles[29]) - 1) #remove newline char
+#smiles <- substr(smiles, 0, nchar(smiles)-2)
+
+#### CONVERT TO SDF #### 
+#may need to do this from terminal
+mols <- parse.smiles(smiles)
+write.molecules(mols, filename="VIP list structures.sdf", write.props = TRUE)
+#do this from console!
+sdfset <- read.SDFset("VIP list structures.sdf")
+cid(sdfset) <- labels
+```
+
+Compute pairwise MCS and Tanimoto coefficient
+```{r}
+#pairwise similarity function for mcs
+pairwise_sim_mcs <- function(sdfset, i,j) {
+  val <- fmcs(sdfset[i], sdfset[j], au=0, bu=0, fast = TRUE)
+  sim <- val["Tanimoto_Coefficient"]
+  sim
+}
+
+#compute dist matrix (it'll take a while!)
+d <- dist_maker(1:length(sdfset), function (i, j) 1 - pairwise_sim_mcs(sdfset, i, j))
+attr(d, "Labels") <- labels
+head(d)
+```
+Generate hierarchical clustering tree (CHECK THAT YOU'VE GOT THE RIGHT NUMBER OF CLUSTERS!!)
+```{r}
+hc <- hclust(d, method = "average") #cluster using hclust (or whatever other clustering method you like)
+plot(hc)
+rect.hclust(hc,
+                         k = 6, # k is used to specify the number of clusters
+                         border = 1:6
+            )
+```
+
+Calculate bootstrap scores for each cluster (CHECK THAT THIS IS THE RIGHT NAME!!)
+```{r}
+x <- clusterboot(d,
+                 B = 1000,
+                 distances = T, bootmethod = "boot",
+                 clustermethod=disthclustCBI, method="average", k = 6)
+```
+
+```{r}
+x$partition
+```
+
+```{r}
+x$bootmean
+```
+
+Silhouette scores
+```{r}
+#silhouette
+#source: https://medium.com/codesmart/r-series-k-means-clustering-silhouette-794774b46586
+silhouette_score <- function(k){
+  c <- cutree(hc, k)
+  ss <- cluster::silhouette(c, d)
+  mean(ss[, 3])
+}
+
+sil_plot <- function(k){
+  c <- cutree(hc, k)
+  ss <- cluster::silhouette(c, d)
+  plot(ss)
+  abline(v = mean(ss[, 3]))
+}
+sil_plot(5)
+```
+
+
+
+
+
+
+
+
+
+
+

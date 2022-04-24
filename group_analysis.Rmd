@@ -1,0 +1,262 @@
+---
+title: "Group analysis"
+output: html_notebook
+---
+```{r}
+library(readxl)
+library(tidyverse)
+library(vegan)
+library(ggplot2)
+library(multcompView) #tukey?
+library(RVAideMemoire) #pairwise manova
+library(ape)
+library(ggtree)
+library(mvMORPH)
+library(colorspace)
+```
+
+```{r}
+me_matrix <- read_excel(path = "Methyl Ether Matrix.xlsx", sheet = "Methyl Ether Matrix (FINAL)")
+me_matrix <- as.data.frame(me_matrix)
+me_names <- me_matrix[1,] #get colnames
+me_matrix <-  me_matrix %>%
+              filter(!is.na(me_matrix[,1])) #remove unapproved files
+
+me_matrix <- me_matrix[-1,] #remove extra row from the top
+row.names(me_matrix) <- me_matrix$...2 #assign row names to file names
+
+me_matrix <- select(me_matrix, !which(is.na(me_names))) #keep only named columns
+colnames(me_matrix) <- me_names[!is.na(me_names)] #assign column names to ME names
+me_matrix <- select(me_matrix, !"Unidentified Methyl Ethers?") #remove unidentified column
+
+me_matrix <- apply(me_matrix, c(1,2), as.numeric) #convert from character vectors to numeric vectors
+me_matrix <- as.data.frame(me_matrix) #convert back to data frame
+
+me_matrix <- me_matrix %>%
+              #filter(grepl("_F_", rownames(me_matrix))) %>% #select only M or F
+              apply(2, replace_na, replace=0) %>% #replace nas
+              as.data.frame() %>% #back to df
+              select(-1) %>% #remove C12
+              filter_all(any_vars(.> 0)) #remove rows without any MEs (i.e., keep rows where abundance of any ME >0)
+
+#Normalize the data (divide each cell by sum of the whole row)
+me_matrix <- me_matrix/rowSums(me_matrix)
+
+#get location and other info from Mass Spectral Identification Progress
+#manual processing: replace the misidentified kama and rest
+#fix some of the dates
+
+progress_sheet <- read_excel(path = "Mass Spectral Identification Progress.xlsx", sheet = "Dragline DCM (FINAL)")
+progress_sheet <- as.data.frame(progress_sheet)
+cols <- progress_sheet[1,]
+rows <- progress_sheet$`...1`
+progress_sheet <- progress_sheet[-1,] %>% #remove top row
+                  select(-1) #remove first column
+rownames(progress_sheet) <- rows[2:length(rows)]
+colnames(progress_sheet) <- cols[2:length(cols)]
+
+me_matrix_info <- merge(progress_sheet, me_matrix, by = 0) #merging by file name
+me_matrix_info$Species <- as.factor(me_matrix_info$Species) #converting to factors in case we want to group
+me_matrix_info$Sex <- as.factor(me_matrix_info$Sex)
+me_matrix_info$`Collection Location` <- as.factor(me_matrix_info$`Collection Location`)
+me_matrix_info$`Spider Type` <- as.factor(me_matrix_info$`Spider Type`)
+
+rownames(me_matrix_info) <- me_matrix_info$Row.names
+me_matrix_info <- me_matrix_info %>%
+  select(-1)
+nrow(me_matrix_info) #should be 246
+```
+Here, subset the full data frame. Select the only files which have data for the grouping variable you are considering, select only females/males, etc.
+```{r}
+selected_matrix <- me_matrix_info %>%
+  #filter(`Species` == "Waika") %>%
+  #filter(`Collection Location` != "?") %>% 
+  #filter(`Collection Location` == "Lower Waikamoi") %>% 
+  #filter(Species != "Kama") %>%
+  #filter(Species != "Waika") %>%
+  #filter(Species != "Quasi") %>%
+  #filter(Species != "Acuta") %>%
+  #filter(Species != "Tri") %>%
+  #filter(Species != "Eury") %>%
+  filter(!is.na(`Species`)) #replace "Collection Location" with whichever division you're considering (species, type, etc.)
+
+selected_me_matrix <- me_matrix %>%
+  filter(row.names(me_matrix) %in% row.names(selected_matrix)) 
+```
+
+Select the grouping variable you're considering.
+```{r}
+grouping_var <- selected_matrix$`Species`
+```
+
+PERMANOVA, PERMDISP, Pairwise PERMANOVA, Tukey test using Bray-Curtis distance
+```{r}
+print("ADONIS results:")
+adonis(selected_matrix %>% select(starts_with("ME ")) ~ grouping_var, method="bray", perm=999) 
+```
+
+```{r}
+#betadisper
+print("betadisper results:")
+betadisp <- betadisper(vegdist(selected_matrix %>% select(starts_with("ME ")), method = "bray"), grouping_var)
+betadisp
+```
+
+```{r}
+#permutest
+print("permutest results:")
+permutest(betadisp, pairwise = FALSE,
+          permutations = 999)
+```
+
+```{r}
+pair_manova <- pairwise.perm.manova(vegdist(selected_me_matrix, method = "bray"), grouping_var,nperm=999)
+pair_manova
+```
+
+```{r}
+#tukey test, where the one variable being considered is mean distance to centroid
+TUKEY <- TukeyHSD(betadisp, conf.level=0.95)
+par(mar=c(5,6,4,1)+.1)
+plot(TUKEY , las=1 , col="brown")
+```
+```{r}
+TUKEY
+```
+Calculating and visualizing bouquet complexity (defined as number of compounds present)
+
+```{r}
+#measuring bouquet complexity by number of compounds present
+#add a column which counts the number of non-zero areas for methyl ethers in each file
+selected_me_matrix_info <- selected_matrix
+selected_me_matrix_info <- cbind(selected_me_matrix_info, "Num_MEs" = apply(selected_me_matrix, 1, function (x) sum(ifelse(x!=0, 1, 0))))
+
+#boxplot grouped by Spider Type (could be Species, or Location -- any grouping variable)
+ggplot(data = selected_me_matrix_info, aes(x= `Spider Type`, y = Num_MEs, fill = `Spider Type`)) + 
+  geom_boxplot() + 
+  theme_minimal() +
+  ggtitle("All")
+```
+
+Calculating average pairwise dissimilarity
+```{r}
+#all files, conspecific and interspecific distances
+d <- vegdist(selected_matrix %>% select(starts_with("ME ")), method = "bray") #create a distance matrix based on the methyl ether matrix
+
+avg_dist_all <- mean(as.vector(t(d)))
+sd_dist_all <- sd(as.vector(t(d)))
+
+#species wise pairwise distances
+d_df <- as.data.frame(as.matrix(d))
+avg_dist_species <- c()
+sd_dist_species <- c()
+cons_dist <- c() #conspecific distances
+inter_dist <- c() #interspecific distances
+
+for (species in levels(me_matrix_info$Species)){
+  species_d <- d_df %>% #conspecific data
+    filter(grepl(species, rownames(d_df))) %>% #filter only rows of the species
+    select(starts_with(species)) %>% #select only columns of the species
+    as.dist() #convert back to distance matrix
+  species_dist_vec <- as.vector(t(species_d))
+  names(species_dist_vec) <- rep(species, times = length(species_dist_vec))
+  avg_dist_species <- c(avg_dist_species, mean(species_dist_vec))
+  sd_dist_species <- c(sd_dist_species, sd(species_dist_vec))
+  cons_dist <- c(cons_dist, species_dist_vec)
+  
+  #interspecific data
+  inter_d <- d_df %>% 
+    filter(grepl(species, rownames(d_df))) %>%  #filter rows of the species
+    select(!starts_with(species)) #select columns that are not of the species
+  inter_dist_vec <- as.vector(t(inter_d)) 
+  names(inter_dist_vec) <- rep("Interspecies", times = length(inter_dist_vec))
+  inter_dist <- c(inter_dist, inter_dist_vec) 
+  
+  #subsetting distance matrix to avoid double counting interspecific
+  d_df <- d_df %>%
+    filter(!grepl(species, rownames(d_df))) %>% #remove rows of the species
+    select(!starts_with(species)) #remove columns of the species
+}
+
+names(avg_dist_species) <- levels(me_matrix_info$Species)
+names(sd_dist_species) <- levels(me_matrix_info$Species)
+
+avg_dist_cons <- mean(cons_dist, na.rm = TRUE)
+sd_dist_cons <- sd(cons_dist, na.rm = TRUE)
+
+avg_dist_inter <- mean(inter_dist, na.rm = TRUE)
+sd_dist_inter <- sd(inter_dist, na.rm = TRUE)
+
+dist_data <- data.frame("Distance" = c(cons_dist, inter_dist), "Species" = c(names(cons_dist), names(inter_dist)))
+dist_data$inter <- ifelse(dist_data$Species == "Interspecies", "Inter", "Cons")
+```
+
+```{r}
+print("Average pairwise Bray-Curtis distances")
+avg_dist_all
+print("Std. Dev of pairwise Bray-Curtis distances")
+sd_dist_all
+```
+
+```{r}
+print("Average pairwise Bray-Curtis distances between all conspecific pairs")
+avg_dist_cons
+print("Std. Dev of pairwise Bray-Curtis distances between all conspecific pairs")
+sd_dist_cons
+```
+```{r}
+print("Average pairwise Bray-Curtis distances between conspecific pairs, for each species")
+avg_dist_species
+print("Std. Dev of pairwise Bray-Curtis distances between conspecific pairs, for each species")
+sd_dist_species
+```
+```{r}
+print("Average pairwise Bray-Curtis distance between all interspecific pairs")
+avg_dist_inter
+print("Std. Dev of pairwise Bray-Curtis distance between all interspecific pairs")
+sd_dist_inter
+```
+T-test comparing interspecific and conspecific pairwise Bray-Curtis distances
+```{r}
+dist_data <- data.frame("Distance" = c(cons_dist, inter_dist), "Species" = c(names(cons_dist), names(inter_dist)))
+dist_data$inter <- ifelse(dist_data$Species == "Interspecies", "Inter", "Cons")
+t.test(dist_data$Distance ~ dist_data$inter)
+wilcox.test(dist_data$Distance ~ dist_data$inter)
+```
+```{r}
+#box and whisker plots of dissimilarity
+ggplot(data = dist_data, aes(x=Species, y = Distance, fill = Species)) + 
+  geom_boxplot() + 
+  theme_minimal() +
+  ggtitle("All")
+```
+
+Plotting avg distance vs no. of samples (check if distance is a function of the no. of samples)
+```{r}
+counts <- me_matrix_info %>% count(Species)
+counts <- counts$n
+count_data <- data.frame(counts = counts, avg_dist = avg_dist_species)
+plot(x = count_data$counts, y = count_data$avg_dist, type = "p")
+linear_mod <- lm(avg_dist ~ counts, count_data)
+abline(lm(avg_dist ~ counts, count_data))
+```
+```{r}
+summary(linear_mod)
+```
+
+Heatmap (do we need this??)
+```{r}
+species_me_matrix <- aggregate(me_matrix_info %>% select(starts_with("ME ")), 
+          by = list(Species = me_matrix_info$Species), 
+          FUN = mean)
+species_me_matrix <- select(species_me_matrix, -1)
+collapsed_tree_without_palu <- read.tree(file = "phylogeny_pruned_without_palu")
+rownames(species_me_matrix) <- sort(collapsed_tree_without_palu$tip.label)
+colnames(species_me_matrix) <- substr(colnames(species_me_matrix), 4, 7)
+p <- ggtree(collapsed_tree_without_palu) + geom_tiplab()
+gheatmap(p, species_me_matrix, 
+         low = "lightcyan", high = "navy", color = "lightcyan", 
+         colnames_angle = 90, font.size = 3,
+         width = 4, offset = 0.04)
+```
+
