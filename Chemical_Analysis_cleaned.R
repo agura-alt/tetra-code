@@ -15,6 +15,7 @@ rm(list=ls()) # Remove all variables to start with a clean slate
 library(vegan)
 library(ggplot2)
 
+
 ## Read in the .csv files that you will be working with
 CHEM <-read.csv("Methyl Ether Matrix.csv", sep=",", row.names=1)
 METADATA <- read.csv("Metadata.csv")

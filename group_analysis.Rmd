@@ -3,69 +3,42 @@ title: "Group analysis"
 output: html_notebook
 ---
 ```{r}
-library(readxl)
 library(tidyverse)
 library(vegan)
 library(ggplot2)
-library(multcompView) #tukey?
 library(RVAideMemoire) #pairwise manova
-library(ape)
 library(ggtree)
-library(mvMORPH)
 library(colorspace)
 ```
 
 ```{r}
-me_matrix <- read_excel(path = "Methyl Ether Matrix.xlsx", sheet = "Methyl Ether Matrix (FINAL)")
-me_matrix <- as.data.frame(me_matrix)
-me_names <- me_matrix[1,] #get colnames
-me_matrix <-  me_matrix %>%
-              filter(!is.na(me_matrix[,1])) #remove unapproved files
-
-me_matrix <- me_matrix[-1,] #remove extra row from the top
-row.names(me_matrix) <- me_matrix$...2 #assign row names to file names
-
-me_matrix <- select(me_matrix, !which(is.na(me_names))) #keep only named columns
-colnames(me_matrix) <- me_names[!is.na(me_names)] #assign column names to ME names
-me_matrix <- select(me_matrix, !"Unidentified Methyl Ethers?") #remove unidentified column
-
-me_matrix <- apply(me_matrix, c(1,2), as.numeric) #convert from character vectors to numeric vectors
-me_matrix <- as.data.frame(me_matrix) #convert back to data frame
-
-me_matrix <- me_matrix %>%
-              #filter(grepl("_F_", rownames(me_matrix))) %>% #select only M or F
-              apply(2, replace_na, replace=0) %>% #replace nas
-              as.data.frame() %>% #back to df
-              select(-1) %>% #remove C12
-              filter_all(any_vars(.> 0)) #remove rows without any MEs (i.e., keep rows where abundance of any ME >0)
-
-#Normalize the data (divide each cell by sum of the whole row)
+#process methyl ether matrix
+me_matrix <- read.csv("Methyl Ether Matrix.csv", sep=",", row.names=1)
+me_matrix <- me_matrix #%>%
+              #filter(grepl("_F_", rownames(me_matrix))) #select only M or F
 me_matrix <- me_matrix/rowSums(me_matrix)
+sum(rowSums(me_matrix)) #should be 246
+```
 
-#get location and other info from Mass Spectral Identification Progress
-#manual processing: replace the misidentified kama and rest
-#fix some of the dates
-
-progress_sheet <- read_excel(path = "Mass Spectral Identification Progress.xlsx", sheet = "Dragline DCM (FINAL)")
-progress_sheet <- as.data.frame(progress_sheet)
-cols <- progress_sheet[1,]
-rows <- progress_sheet$`...1`
-progress_sheet <- progress_sheet[-1,] %>% #remove top row
-                  select(-1) #remove first column
-rownames(progress_sheet) <- rows[2:length(rows)]
-colnames(progress_sheet) <- cols[2:length(cols)]
-
-me_matrix_info <- merge(progress_sheet, me_matrix, by = 0) #merging by file name
+```{r}
+metadata <- read.csv("Metadata.csv", sep=",", row.names=1)
+me_matrix_info <- merge(metadata, me_matrix, by = 0) #merging by filenames
 me_matrix_info$Species <- as.factor(me_matrix_info$Species) #converting to factors in case we want to group
 me_matrix_info$Sex <- as.factor(me_matrix_info$Sex)
-me_matrix_info$`Collection Location` <- as.factor(me_matrix_info$`Collection Location`)
-me_matrix_info$`Spider Type` <- as.factor(me_matrix_info$`Spider Type`)
+me_matrix_info$`Location` <- as.factor(me_matrix_info$`Location`)
 
+#add spider type column
+spider_type_dict <- c("Acuta"="Web", "Brevi"="Spiny", "EF"="Web", "Eury"="Web", "Fili"="Web", "Kama"="Spiny", "Pall"="Web", "Quasi"="Spiny", "Rest"="Spiny", "Stella"="Web", "Tri"="Web", "Vers"="Web", "Waika"="Spiny")
+get_spider_type <- function(x) {spider_type_dict[x]}
+me_matrix_info$`Spider Type` <- as.factor(get_spider_type(me_matrix_info$Species))
+
+#resetting rownames to file names
 rownames(me_matrix_info) <- me_matrix_info$Row.names
 me_matrix_info <- me_matrix_info %>%
   select(-1)
 nrow(me_matrix_info) #should be 246
 ```
+
 Here, subset the full data frame. Select the only files which have data for the grouping variable you are considering, select only females/males, etc.
 ```{r}
 selected_matrix <- me_matrix_info %>%
@@ -92,13 +65,13 @@ grouping_var <- selected_matrix$`Species`
 PERMANOVA, PERMDISP, Pairwise PERMANOVA, Tukey test using Bray-Curtis distance
 ```{r}
 print("ADONIS results:")
-adonis(selected_matrix %>% select(starts_with("ME ")) ~ grouping_var, method="bray", perm=999) 
+adonis(selected_matrix %>% select(starts_with("ME.")) ~ grouping_var, method="bray", perm=999) 
 ```
 
 ```{r}
 #betadisper
 print("betadisper results:")
-betadisp <- betadisper(vegdist(selected_matrix %>% select(starts_with("ME ")), method = "bray"), grouping_var)
+betadisp <- betadisper(vegdist(selected_matrix %>% select(starts_with("ME.")), method = "bray"), grouping_var)
 betadisp
 ```
 
@@ -141,7 +114,7 @@ ggplot(data = selected_me_matrix_info, aes(x= `Spider Type`, y = Num_MEs, fill =
 Calculating average pairwise dissimilarity
 ```{r}
 #all files, conspecific and interspecific distances
-d <- vegdist(selected_matrix %>% select(starts_with("ME ")), method = "bray") #create a distance matrix based on the methyl ether matrix
+d <- vegdist(selected_matrix %>% select(starts_with("ME.")), method = "bray") #create a distance matrix based on the methyl ether matrix
 
 avg_dist_all <- mean(as.vector(t(d)))
 sd_dist_all <- sd(as.vector(t(d)))
@@ -244,13 +217,16 @@ abline(lm(avg_dist ~ counts, count_data))
 summary(linear_mod)
 ```
 
-Heatmap (do we need this??)
+Heatmap
 ```{r}
-species_me_matrix <- aggregate(me_matrix_info %>% select(starts_with("ME ")), 
+species_me_matrix <- aggregate(me_matrix_info %>% select(starts_with("ME.")), 
           by = list(Species = me_matrix_info$Species), 
           FUN = mean)
 species_me_matrix <- select(species_me_matrix, -1)
+
+#load phylogeny
 collapsed_tree_without_palu <- read.tree(file = "phylogeny_pruned_without_palu")
+
 rownames(species_me_matrix) <- sort(collapsed_tree_without_palu$tip.label)
 colnames(species_me_matrix) <- substr(colnames(species_me_matrix), 4, 7)
 p <- ggtree(collapsed_tree_without_palu) + geom_tiplab()
